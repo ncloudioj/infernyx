@@ -47,9 +47,9 @@ def expire_data(days, dryrun):
         if prefix in tags and tag_date < date_lower:
             to_delete.append(tag)
 
+    to_delete.sort()  # delete tags with "incoming" first, then the "processed" ones
     if dryrun:
         if to_delete:
-            to_delete.sort()
             print "Following tags will be deleted:\n"
             print "\n".join(to_delete)
         else:
