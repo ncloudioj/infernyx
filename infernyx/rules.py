@@ -348,7 +348,7 @@ def clean_activity_stream_event(parts, params):
 
         # check those optional fields
         for f in ['action_position', 'source', 'experiment_id', 'session_id',
-                  'url', 'recommender_type']:
+                  'url', 'recommender_type', 'highlight_type']:
             # populate the optional fields with default values if they are missing
             if f not in parts:
                 parts[f] = "n/a"
@@ -525,7 +525,7 @@ RULES = [
                 table='activity_stream_stats_daily',
             ),
             'activity_stream_event_stats': Keyset(
-                key_parts=['client_id', 'tab_id', 'source', 'action_position', 'session_id',
+                key_parts=['client_id', 'tab_id', 'source', 'action_position', 'session_id', 'highlight_type',
                            'addon_version', 'locale', 'page', 'event', 'experiment_id', 'url', 'recommender_type',
                            'receive_at', 'date', 'country_code', 'os', 'browser', 'version', 'device'],
                 value_parts=[],  # no value_parts for this keyset
