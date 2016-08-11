@@ -352,6 +352,11 @@ def clean_activity_stream_event(parts, params):
             # populate the optional fields with default values if they are missing
             if f not in parts:
                 parts[f] = "n/a"
+        # A hotfix for issue 1034 of activity stream version 1.1.1
+        # The addon will send keys with null values for fields 'recommender_type' and 'highlight_type'
+        # we need to replace those nulls as Inferno doesn't allow nulls in the key parts
+        for f in ['recommender_type', 'highlight_type']:
+            parts[f] = parts[f] or "n/a"
         yield parts
     except Exception:
         pass
