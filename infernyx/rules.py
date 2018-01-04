@@ -2,12 +2,13 @@ from datadog import statsd
 from inferno.lib.rule import chunk_json_stream
 from inferno.lib.rule import InfernoRule
 from inferno.lib.rule import Keyset
-from infernyx.database import insert_redshift, get_blacklist_ips, delete_old_blacklist_ips
+from infernyx.database import insert_redshift, get_blacklist_ips, delete_old_blacklist_ips, insert_hustle_marble
 import infernyx.rule_helpers
 from functools import partial
 from config_infernyx import *
 import datetime
 import logging
+import re
 
 from infernyx.rule_helpers import clean_data, parse_date, parse_time, parse_locale, parse_ip, parse_ua,\
     parse_tiles, parse_urls, parse_distinct, parse_ip_clicks, count, filter_clicks, filter_blacklist,\
@@ -20,7 +21,8 @@ from infernyx.rule_helpers import clean_data, parse_date, parse_time, parse_loca
     clean_assa_impression, firefox_onboarding_session_filter, firefox_onboarding_event_filter,\
     clean_firefox_onboarding_event, clean_firefox_onboarding_session, ping_centre_main_filter,\
     clean_ping_centre_main, firefox_onboarding_session_filter_v2, firefox_onboarding_event_filter_v2,\
-    clean_firefox_onboarding_session_v2, clean_firefox_onboarding_event_v2
+    clean_firefox_onboarding_session_v2, clean_firefox_onboarding_event_v2, as_user_counting_map,\
+    as_user_counting_combiner, as_user_counting_reduce
 
 
 log = logging.getLogger(__name__)
@@ -34,6 +36,9 @@ LOCALE_WHITELIST = {'ach', 'af', 'an', 'ar', 'as', 'ast', 'az', 'be', 'bg', 'bn-
                     'mr', 'ms', 'my', 'nb-no', 'nl', 'nn-no', 'oc', 'or', 'pa-in', 'pl', 'pt-br', 'pt-pt',
                     'rm', 'ro', 'ru', 'si', 'sk', 'sl', 'son', 'sq', 'sr', 'sv-se', 'sw', 'ta', 'te', 'th',
                     'tr', 'uk', 'ur', 'vi', 'xh', 'zh-cn', 'zh-tw', 'zu'}
+
+AS_HLL_MAP_KEYS = ['date', 'release_channel', 'version', 'country_code']
+AS_HLL_COLUMNS = AS_HLL_MAP_KEYS + ['hll']
 
 
 def combiner(key, value, buf, done, params):
@@ -104,6 +109,29 @@ def tag_results(suffix, job):
             log.warn("No data to tag for job %s" % job_id)
     except Exception as e:
         log.error("Error tagging results %s" % e)
+
+
+def tag_input_blobs(job, tag_name):
+    job_id = job.job_name
+    ddfs = job.ddfs
+    try:
+        for tag, blobs in job.archiver.tag_map.iteritems():
+            if tag.startswith("processed") or len(blobs) == 0:
+                continue
+            else:
+                date = tag.split(':')[-1]
+                archive_name = "incoming:%s:%s" % (tag_name, date)
+                ddfs.tag(archive_name, blobs)
+                log.info('%s archived %d blobs to %s' % (job_id, len(blobs), archive_name))
+    except Exception as e:
+        log.error("%s error tagging input blobs %s" % (job_id, e))
+
+
+def tag_and_report(job, tag_name):
+    # tag the input blobs only if Inferno is NOT in debug mode
+    if not job.settings.get('debug'):
+        tag_input_blobs(job, tag_name)
+    report_rule_stats(job)
 
 
 RULES = [
@@ -188,7 +216,7 @@ RULES = [
         max_blobs=APP_MAX_BLOBS,
         min_blobs=APP_MIN_BLOBS,
         archive=True,
-        rule_cleanup=report_rule_stats,
+        rule_cleanup=partial(tag_and_report, tag_name="activity_stream_user_counting"),
         map_input_stream=chunk_json_stream,
         map_init_function=impression_stats_init,
         parts_preprocess=[parse_batch, partial(clean_data, imps=False), parse_date, parse_ip,
@@ -252,6 +280,28 @@ RULES = [
                 table='assa_impression_stats_daily'
             )
         }
+    ),
+    InfernoRule(
+        name='activity_stream_user_counting',
+        source_tags=['incoming:activity_stream_user_counting'],
+        max_blobs=APP_MAX_BLOBS,
+        min_blobs=APP_MIN_BLOBS,
+        archive=True,
+        rule_cleanup=report_rule_stats,
+        map_input_stream=chunk_json_stream,
+        map_init_function=impression_stats_init,
+        map_keys=AS_HLL_MAP_KEYS,
+        valid_channels=['release', 'nightly', 'beta'],
+        # beta/release: 57.0, 57.0.1; nightly: 59.0a1; esr: 60.0esr, 60.0.1esr
+        version_pattern=re.compile("^\d{2}\.\w{1,5}(\.\w{1,5})?$"),
+        preprocessors=[parse_batch, assa_session_filter, partial(clean_data, imps=False), parse_ip],
+        geoip_file=GEOIP,
+        partitions=32,
+        sort_buffer_size='25%',
+        map_function=as_user_counting_map,
+        reduce_function=as_user_counting_reduce,
+        combiner_function=as_user_counting_combiner,
+        result_processor=partial(insert_hustle_marble, table_name='as_hlls', columns=AS_HLL_COLUMNS)
     ),
     InfernoRule(
         name='application_stats',

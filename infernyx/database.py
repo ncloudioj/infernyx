@@ -201,3 +201,39 @@ def delete_old_blacklist_ips(host, port, database, user, password):
         connection.commit()
     finally:
         connection.close()
+
+
+def insert_hustle_marble(disco_iter, params, job_id, table_name, columns=None, maxsize=100 * 1024 * 1024,
+                         tmpdir='/tmp', decoder=ujson.decode, lru_size=10000, **kwargs):
+    from hustle import Table
+    from hustle.core.settings import Settings
+    import base64
+    import os
+
+    settings = Settings(**kwargs)
+    ddfs = settings['ddfs']
+    table = Table.from_tag(table_name)
+    field_names = columns or table._field_names
+
+    def part_tag(name, partition=None):
+        rval = "hustle:" + name
+        if partition:
+            rval += ':' + str(partition)
+        return rval
+
+    def make_stream():
+        for key, value in disco_iter:
+            data = dict(zip(field_names,
+                        key + [base64.b64decode(value[0])]))
+            yield data
+
+    lines, partition_files = table._insert([make_stream()],
+                                           maxsize=maxsize, tmpdir=tmpdir,
+                                           decoder=lambda x: x, lru_size=lru_size)
+    if partition_files is not None:
+        for part, file_ in partition_files.iteritems():
+            tag = part_tag(table._name, part)
+            ddfs.push(tag, [file_])
+            _log(job_id, 'Pushed tag %s for partition %s' % (tag, part))
+            _log(job_id, 'Nuking local marble file %s' % file_)
+            os.unlink(file_)

@@ -736,3 +736,59 @@ def clean_assa_impression(parts, params):
         yield parts
     except Exception:
         pass
+
+
+def as_user_counting_map(parts, params):
+    import ujson
+
+    def make_keys(parts, params):
+        return ujson.dumps([parts[key] for key in params.map_keys])
+
+    def parts_preprocess(parts, params):
+        parts_list = [parts]
+        for func in params.preprocessors:
+            inner_result = []
+            for parts in parts_list:
+                inner_result += list(func(parts, params))
+            parts_list = inner_result
+        return parts_list
+
+    for result in parts_preprocess(parts, params):
+        try:
+            assert "client_id" in result
+            assert "country_code" in result
+            assert result["release_channel"] in params.valid_channels
+            assert params.version_pattern.match(result["version"])
+            yield make_keys(result, params), result['client_id']
+        except:
+            pass
+
+
+def as_user_counting_reduce(iter, params):
+    from itertools import imap
+    from disco.util import kvgroup
+    from cardunion import Cardunion
+    import ujson
+    import base64
+
+    for key, hlls in kvgroup(sorted(iter)):
+        hll = Cardunion(12)
+        hll_dumps = imap(base64.b64decode, hlls)
+        hll.bunion(hll_dumps)
+        yield ujson.loads(key), [base64.b64encode(hll.dumps())]
+
+
+def as_user_counting_combiner(key, value, buf, done, params):
+    from cardunion import Cardunion
+    import base64
+
+    if not done:
+        if key not in buf:
+            hll = Cardunion(12)
+            buf[key] = hll
+        else:
+            hll = buf[key]
+        hll.add(value)
+    else:
+        for key, hll in buf.iteritems():
+            yield key, base64.b64encode(hll.dumps())
